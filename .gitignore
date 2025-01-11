@@ -1,0 +1,11 @@
+# ignore codes that were eventually not used for the draft
+code_on_slurm/lag_test_alt_lag.py
+code_on_slurm/lag_test_alt_lag.sh
+code_on_slurm/lag_test_best_compare.py
+code_on_slurm/lag_test_vary_res.py
+code_on_slurm/phi_pre.py
+code_on_slurm/phi_pre.sh
+
+notebooks/invasibility.ipynb
+notebooks/lag_test.ipynb
+notebooks/phi_pre.ipynb

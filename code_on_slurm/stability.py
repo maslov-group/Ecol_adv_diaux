@@ -199,4 +199,4 @@ if __name__=="__main__":
                     F = FMatLag(species_list, dep_order, t_iter, S, tau_mod)
                     if(abs(np.linalg.det(F))>1e-10):
                         stabilities.append( (log(np.abs(np.linalg.det(F))/(exp(log(D))-1)**R)/log(10))/(R-1) )
-    pickle.dump(stabilities, open(f"stabilities_Nseq={Nseq}_parameters={parameters_ind}.pkl", "wb"))
+    pickle.dump(stabilities, open(f"../data/stabilities/stabilities_Nseq={Nseq}_parameters={parameters_ind}.pkl", "wb"))

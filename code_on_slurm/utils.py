@@ -308,48 +308,68 @@ def Pert_mat_co_hwa(g, gC, dep_order, G, t, F, env):
 ##################################################################################################################
 # lag related functions
 # what resource is the species eating
-def resource_eating(pref_list, dep_order):
-    N, R = pref_list.shape[0], pref_list.shape[1]
-    RE = np.zeros([N, R], dtype=np.int32)
+def G_mat_hwa(spc_list, dep_order):
+    '''
+    spc: species obbject list of length N=R
+    dep_order: array([R])
+    '''
+    R = len(dep_order)
+    N = R
+    G = np.zeros([N, R])
+    for i_n, spc in enumerate(spc_list):
+        for i_t in range(R):
+            Rs = np.array([1*(res+1 in dep_order[i_t:]) for res in range(R)])
+            spc.lag_left=0
+            spc.GetEating(Rs)
+            G[i_n, i_t] = spc.GetGrowthRate()            
+    return G
+
+def NicheGrowthState(spcs, dep_order, t_order):
+    '''
+    spcs: list of species (object; SeqUt_alt or CoUt_alt) 
+    dep_order: np array; order of resources (1 to R) depleted
+    t_order: np array; time spans of each temporal niche. 
+    '''
+    # RE: resource_eating for [spc, niche], 
+    # in an np array with boolean list of elements
+    N, R = len(spcs), len(dep_order)
+    RE = np.zeros([N, R], dtype=object)
     for i_n in range(N):
         for i_t in range(R):
-            for i in range(R):
-                top_resource = pref_list[i_n][i]
-                if(top_resource in dep_order[i_t:]):
-                    RE[i_n, i_t] = top_resource
-                    break
-    return RE
-
-#def a state matrix
-def niche_growth_state(RE, taus, t_order):
-    N, R = taus.shape[0], taus.shape[1]
+            Rs = np.zeros(R)
+            for res in dep_order[i_t:]:
+                Rs[res-1] = 1
+            spcs[i_n].lag_left = 0
+            spcs[i_n].GetEating(Rs)
+            RE[i_n, i_t] = spcs[i_n].eating
     # here we define a niche growth state matrix S, whose elements can be 0, 1, or 2
     # 0 means no growth; 1 means growth during full niche; 2 means part of of niche is taken by lag
     # and define a tau_mod - the lag time in each niche for those 2 elements in S. 
+    # initialize by all niche - all growth
     S = np.ones([N, R])
     tau_mod = np.zeros([N, R])
-    for species in range(N):
-        # check the behavior between rsi-th t-niche and rei-th t-niche
-        # which starts from 1 (second t-niche),
-        # because we assume sum(t-niche)<<T, which means the lag in first t-niche is due to recovering from dormancy,
-        # and we assume them to be species- and resource- independent. 
-        res_last = 0 
+    for i_n, spc in enumerate(spcs):
         in_lagphase = 0
         tau_new = 0
-        for niche in np.arange(1, R):
+        for niche in np.arange(0, R):
             # if next time niche is a different resource, 
             # we assume the species would renew the current lag by the lagtime of
             # switching from the previous (actively consuming) nutrient to the current nutrient
             # regardless of whether it was already in the middle of a lag phase or not. 
-            if(RE[species][niche]!=RE[species][niche-1]): 
-                tau_new = taus[species, RE[species][res_last]-1, RE[species][niche]-1]
+            if(niche==0 or not np.array_equal(RE[i_n, niche], RE[i_n, niche-1])):
+                # update the lag
+                if(niche==0):
+                    tau_new = spc.tau_init
+                else:
+                    Rs = np.array([int(i+1 in dep_order[niche:]) for i in range(R)]) # if res is in leftover resources then 1; else 0
+                    tau_new = spc.tau_f(Rs, spc.rho, spc.tau0)
+                # check if this lag outlasts the t-niche
                 if(tau_new < t_order[niche]):
-                    S[species, niche] = 2
-                    tau_mod[species, niche] = tau_new
-                    res_last = niche
+                    S[i_n, niche] = 2
+                    tau_mod[i_n, niche] = tau_new
                     in_lagphase = 0
                 else:
-                    S[species, niche] = 0
+                    S[i_n, niche] = 0
                     tau_new -= max(0, t_order[niche])
                     in_lagphase = 1
             # if the next time niche is a same resource, 
@@ -357,101 +377,62 @@ def niche_growth_state(RE, taus, t_order):
             # with no need to renew the lagtime value. 
             elif(in_lagphase == 1):
                 if(tau_new < t_order[niche]):
-                    S[species, niche] = 2
-                    tau_mod[species, niche] = tau_new
+                    S[i_n, niche] = 2
+                    tau_mod[i_n, niche] = tau_new
                     in_lagphase = 0
-                    res_last = niche
                 else:
-                    S[species, niche] = 0
+                    S[i_n, niche] = 0
                     tau_new -= max(0, t_order[niche])
+            # else: the spc was growing and the next niche it's eating the same stuff. S=1 and tau_mod=0. 
     return S, tau_mod
 
-# this gives the first iteration of the tau_mod
-def tau_gtoG(taus, pref, dep_order):
-    N, R = taus.shape[0], taus.shape[1]
-    tau_G = np.zeros([N, R])
-    for i_n in range(N):
-        top_resource_prev = -1
-        for i_t in range(R):
-            for i in range(R):
-                top_resource = pref[i_n][i]
-                if(top_resource in dep_order[i_t:]):
-                    break
-            if(i_t>=1):
-                tau_G[i_n, i_t] = taus[i_n, top_resource_prev-1, top_resource-1]
-            top_resource_prev = top_resource
-    return tau_G
-
-# define a function to do the iterative thing
-def tsolve_iter(G, RE, taus, tau_mod, logD):
+def TsolveIter(spc_list, dep_order, logD, T=24): # N = R must be ensured
     # species-niche growth state S
-    N, R = taus.shape[0], taus.shape[1]
-    S = np.ones([N, R])
-    # make the modifications in the first iteration
+    N = len(spc_list)
+    R = N
+    S = np.ones([N, R]) * 2 # initialize S at 2. 0 is all lag in this niche and 1 is all growth
+    # before the first iter
     converged = 0
     t_iter_compare = np.zeros(R)
-    for count in range(10):
-        rhs = logD + np.diag( (G*(S>0)) @np.transpose(tau_mod))
+    G = G_mat_hwa(spc_list, dep_order)
+    # for the first iteration of S and tau_mod, go with all t_order=max
+    S, tau_mod = NicheGrowthState(spc_list, dep_order, np.ones(R)*T)
+    # to keep time short do 10 iters at most
+    for count in range(10): 
+        # rhs: [Gt = logD]'s rhs, vec of len R
+        rhs = logD + np.diag( (G*(S>0)) @ np.transpose(tau_mod) )
         if(np.linalg.matrix_rank(G*(S>0))>=N):
-        # if(1):
             t_iter = np.linalg.inv(G*(S>0))@rhs
-            S, tau_mod = niche_growth_state(RE, taus, t_iter)
-            if (t_iter_compare==t_iter).all():
+            # update S and tau_mod based on this set of new t_iter
+            S, tau_mod = NicheGrowthState(spc_list, dep_order, t_iter)
+            if ((t_iter_compare==t_iter).all() and np.sum(t_iter)<=24):
                 converged = 1
                 break
             t_iter_compare = t_iter
         else:
             converged = 0
             break
-    return converged, t_iter, S, tau_mod
+    return converged, t_iter_compare, S, tau_mod
 
-def F_mat_lag(g, pref_list, dep_order, logD, N, R, taus):
-    RE = resource_eating(pref_list, dep_order)
-    tau_mod = tau_gtoG(taus, pref_list, dep_order)
-    G = G_mat(g, pref_list, dep_order, N, R)
-    _, t_iter, S, tau_mod = tsolve_iter(G, RE, taus, tau_mod, logD)
-    F_mat = np.zeros([R, N])
-    G_mod = G*(S>0)
-    for species in range(N):
-        current_growth = G_mod[species][0]*(t_iter[0]-tau_mod[species][0])
+def FMatLag(spcs, dep_order, t_order, S, tau_mod):
+    N, R = len(spcs), len(dep_order)
+    F_mat = np.zeros([N, R])
+    for i_n in range(N):
         coeff = 1
-        for niche in range(1, R):
-            if(RE[species, niche-1]!=RE[species, niche]):
-                F_mat[species, RE[species, niche-1]-1] = coeff * (exp(current_growth) - 1)
-                coeff *= exp(current_growth)
-                current_growth = G_mod[species][niche]*(t_iter[niche]-tau_mod[species][niche])
+        for i_t in range(R):
+            Rs = np.zeros(R)
+            for res in dep_order[i_t:]:
+                Rs[res-1] = 1
+            spcs[i_n].GetEating(Rs)
+            g = spcs[i_n].GetGrowthRate()
+            vec_dep = spcs[i_n].GetDep()
+            if(S[i_n, i_t] == 1):
+                dep = coeff * (exp(g*t_order[i_t]) - 1)
+                coeff *= exp(g*t_order[i_t])
+            elif S[i_n, i_t] == 2:
+                dep = coeff * (exp(g*(t_order[i_t]-tau_mod[i_n, i_t])) - 1)
+                coeff *= exp(g*(t_order[i_t]-tau_mod[i_n, i_t]))
             else:
-                current_growth += G_mod[species][niche]*(t_iter[niche]-tau_mod[species][niche])
-            if(niche==R-1):
-                F_mat[species, RE[species, niche]-1] = coeff * (exp(current_growth) - 1)
+                dep=0
+            F_mat[i_n, :] += dep * vec_dep
     return np.transpose(F_mat)
-
-def b_to_b_hwa_lag(g, gC, dep_order, G, t, F, S, tau_mod, env, i, j):
-    effect = int(i==j)
-    R = env["R"]
-    N = env["N"]
-    G = G*(S>0)
-    # how B changes T
-    term1 = np.zeros(R)
-    for k in range(1, R+1):
-        ind = dep_order.index(k)
-        t_mod = np.tile(t[:ind+1], [N, 1]) - tau_mod[:, :ind+1]
-        B_list = np.exp(np.diag(G[:, :ind+1]@(t_mod.T))) # every bug's growth by Rk depletion
-        g_list = G[:, ind] # every bug's growth rate by Rk depletion
-        if( B_list[G[:, ind]==g[:, k-1]] @ g_list[G[:, ind]==g[:, k-1]] > 0):
-            term1[k-1] = 1 / ( B_list[G[:, ind]==g[:, k-1]] @ g_list[G[:, ind]==g[:, k-1]] ) # only consider those bugs eating Rk
-    term1 = term1 * (-F[:, i])
-    # how T changes another B
-    term2 = np.zeros(R)
-    for k in range(1, R):
-        term2[dep_order[k-1]-1] = G[j, k-1] - G[j, k]
-    term2[dep_order[-1]-1] = G[j, R-1]
-    effect += term1@term2
-    return effect
-def Pert_mat_hwa_lag(g, gC, dep_order, G, t, F, S, tau_mod, env):
-    N = env["N"]
-    P = np.zeros([N, N])
-    for i in range(N):
-        for j in range(N):
-            P[i, j] = b_to_b_hwa_lag(g, gC, dep_order, G, t, F, S, tau_mod, env, i, j)
-    return P
